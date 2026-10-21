@@ -2,18 +2,28 @@ name: Hourly check
 
 # Once an hour, asks a private team tool to send any notifications that are due.
 # Its address lives in the TICK_URL secret; the log shows only the status code.
-# It has a fixed end: GitHub switches this schedule off 60 days after the last
-# change to this repository. Keeping it on longer needs a new yes from the owner.
+#
+# It stops on its own once the tool is no longer used. GitHub switches a public
+# repository's schedule off 60 days after the repository's last change. The weekly
+# step below makes a one-line change only while someone has opened the tool in the
+# last 30 days, so the check runs while the tool is used and ends after it is not.
 
 on:
   schedule:
-    - cron: "7 * * * *"   # hourly, a few minutes past the hour
-  workflow_dispatch: {}
+    - cron: "7 * * * *"    # hourly, a few minutes past the hour
+    - cron: "41 5 * * 1"   # weekly: keep the schedule on while the tool is used
+  workflow_dispatch:
+    inputs:
+      renew:
+        description: "Run the weekly step now, even if the last change is recent"
+        type: boolean
+        default: false
 
 permissions: {}
 
 jobs:
   tick:
+    if: github.event.schedule == '7 * * * *' || (github.event_name == 'workflow_dispatch' && !inputs.renew)
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -25,3 +35,27 @@ jobs:
           code=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 20 -X POST "$TICK_URL" || true)
           echo "Answered with HTTP $code."
           case "$code" in 2??) ;; *) exit 1 ;; esac
+
+  renew:
+    if: github.event.schedule == '41 5 * * 1' || (github.event_name == 'workflow_dispatch' && inputs.renew)
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: write
+    steps:
+      - name: Keep the schedule on while the tool is used
+        env:
+          TICK_URL: ${{ secrets.TICK_URL }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          FORCE: ${{ inputs.renew && 'yes' || 'no' }}
+        run: |
+          last=$(gh api "repos/$REPO/commits/main" --jq .commit.committer.date)
+          age=$(( ( $(date +%s) - $(date -d "$last" +%s) ) / 86400 ))
+          if [ "$FORCE" != yes ] && [ "$age" -lt 45 ]; then echo "Last change $age days ago; nothing to do."; exit 0; fi
+          in_use=$(curl --silent --max-time 20 -X POST "$TICK_URL" | jq -r '.in_use // false' 2>/dev/null || echo false)
+          if [ "$in_use" != true ]; then echo "Not renewed."; exit 0; fi
+          sha=$(gh api "repos/$REPO/contents/renewed.txt" --jq .sha 2>/dev/null || true)
+          gh api -X PUT "repos/$REPO/contents/renewed.txt" -f message="Keep the hourly check on" \
+            -f content="$(date -u +%Y-%m-%d | base64)" ${sha:+-f sha="$sha"} > /dev/null
+          echo "Renewed."
