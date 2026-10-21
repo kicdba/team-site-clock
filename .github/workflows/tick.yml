@@ -1,0 +1,40 @@
+name: Hourly check
+
+# Once an hour, asks a private team tool to send any notifications that are due.
+# Its address lives in the TICK_URL secret; the log shows only the status code.
+
+on:
+  schedule:
+    - cron: "7 * * * *"   # hourly, a few minutes past the hour
+    - cron: "41 5 * * 1"  # weekly: keeps this schedule switched on
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  tick:
+    if: github.event.schedule != '41 5 * * 1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ask the tool to send what is due
+        env:
+          TICK_URL: ${{ secrets.TICK_URL }}
+        run: |
+          if [ -z "$TICK_URL" ]; then echo "TICK_URL is not set."; exit 1; fi
+          code=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 20 -X POST "$TICK_URL" || true)
+          echo "Answered with HTTP $code."
+          case "$code" in 2??) ;; *) exit 1 ;; esac
+
+  keep-on:
+    # GitHub switches off schedules in a public repository after 60 days without
+    # activity. Re-enabling this workflow each week keeps the hourly check running.
+    if: github.event.schedule == '41 5 * * 1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      - run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/tick.yml/enable"
+        env:
+          GH_TOKEN: ${{ github.token }}
